@@ -1,0 +1,21 @@
+[Unit]
+Description=RCT Randomization Service
+After=network.target
+
+[Service]
+Type=simple
+User=rct
+Group=rct
+WorkingDirectory=/opt/rct
+EnvironmentFile=/etc/rct/rct.env
+ExecStart=/usr/bin/python3.8 /opt/rct/app.py
+Restart=always
+RestartSec=3
+PrivateTmp=true
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/rct
+
+[Install]
+WantedBy=multi-user.target

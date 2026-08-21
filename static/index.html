@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>多中心随机分组测试系统</title><link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main>
+  <header><div><span class="tag">RCT DEMO</span><h1>随机分组系统</h1><p>患者入组与随机分配</p></div><button id="logout" class="link hidden">退出登录</button></header>
+  <div class="warning">测试环境：请勿录入姓名、身份证号、住院号等真实个人信息。</div>
+  <section id="login" class="card narrow">
+    <h2>账号登录</h2><label>账号<input id="username" autocomplete="username" placeholder="例如 center1"></label>
+    <label>密码<input id="password" type="password" autocomplete="current-password" placeholder="请输入密码"></label>
+    <button id="loginBtn">登录</button><p class="hint">管理员账号请见部署说明</p>
+  </section>
+  <div id="app" class="hidden">
+    <section class="welcome"><div><small>当前用户</small><h2 id="who"></h2></div><div id="progress" class="progress"></div></section>
+    <section id="randomPanel" class="card narrow">
+      <h2>新患者随机</h2><p class="hint">仅填写脱敏后的患者研究编号。确认后不可撤销。</p>
+      <label>患者研究编号<input id="patientId" maxlength="40" placeholder="例如 C01-001"></label>
+      <label>姓名缩写（选填）<input id="patientInitials" maxlength="20" placeholder="例如 ZS"></label>
+      <div class="formRow"><label>性别（选填）<select id="sex"><option value="">请选择</option><option>男</option><option>女</option><option>其他/未知</option></select></label>
+      <label>年龄（选填）<input id="age" type="number" min="0" max="120" placeholder="岁"></label></div>
+      <label>备注（选填，最多200字）<textarea id="note" maxlength="200" rows="3"></textarea></label>
+      <button id="randomBtn">确认并随机分组</button>
+      <div id="result" class="result hidden"></div>
+    </section>
+    <section id="userPanel" class="card hidden">
+      <div class="sectionTitle"><div><h2>中心账号管理</h2><p class="hint">管理员可创建中心账号；患者录入仅在中心账号登录后显示。已有患者记录的中心不能删除。</p></div></div>
+      <div class="accountForm"><label>登录账号<input id="newUsername" maxlength="30" placeholder="例如 doctor01"></label>
+      <label>医生姓名/称呼<input id="newDisplayName" maxlength="40" placeholder="例如 张医生"></label>
+      <label>中心名称<input id="newCenterName" maxlength="60" placeholder="例如 第一医院"></label>
+      <label>初始密码<input id="newPassword" type="password" minlength="8" placeholder="至少8位"></label></div>
+      <button id="addUserBtn">添加中心账号</button>
+      <div class="tableWrap"><table><thead><tr><th>账号</th><th>医生姓名/称呼</th><th>所属中心</th><th>操作</th></tr></thead><tbody id="users"></tbody></table></div>
+    </section>
+    <section class="card"><div class="sectionTitle"><div><h2>随机记录</h2><p class="hint">仅显示已完成的随机，不显示未来序列。</p></div><a id="export" class="button" href="/api/export">导出 CSV</a></div>
+      <div class="tableWrap"><table><thead><tr><th>中心</th><th>序号</th><th>研究编号</th><th>姓名缩写</th><th>性别</th><th>年龄</th><th>备注</th><th>分组</th><th>时间</th><th>操作者</th><th>操作</th></tr></thead><tbody id="records"></tbody></table></div>
+    </section>
+  </div><div id="toast" class="toast hidden"></div>
+</main><script src="app.js"></script>
+</body></html>

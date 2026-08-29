@@ -14,5 +14,8 @@ dist/
 # Packages
 *.zip
 
+# 内部登录信息（含密码/IP，严禁提交）
+登录信息*.md
+
 # Claude Code agent definitions
 .agents/

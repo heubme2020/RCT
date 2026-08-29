@@ -28,6 +28,7 @@ SESSIONS = {}
 def db():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout = 10000")
     return conn
 
 
@@ -43,24 +44,51 @@ def password_ok(password, stored):
     return hmac.compare_digest(actual, expected)
 
 
-def make_sequence():
-    # Balanced variable blocks totalling 50: random choices among valid 4/6 combinations.
-    possibilities = [[4] * 11 + [6], [4] * 8 + [6] * 3, [4] * 5 + [6] * 5,
-                     [4] * 2 + [6] * 7]
-    sizes = secrets.choice(possibilities)
-    secrets.SystemRandom().shuffle(sizes)
-    sequence = []
-    for size in sizes:
-        block = ["A"] * (size // 2) + ["B"] * (size // 2)
-        secrets.SystemRandom().shuffle(block)
-        sequence.extend(block)
-    return sequence
+ALLOCATIONS_SCHEMA = """(
+  owner TEXT NOT NULL, position INTEGER NOT NULL, treatment TEXT NOT NULL,
+  center INTEGER NOT NULL, patient_id TEXT, patient_initials TEXT, sex TEXT,
+  age INTEGER, note TEXT, randomized_at TEXT, randomized_by TEXT,
+  voided_at TEXT, voided_by TEXT, void_reason TEXT, legacy_position INTEGER,
+  PRIMARY KEY(owner, position)
+)"""
+LEGACY_COLUMNS = ("center", "position", "treatment", "patient_id", "patient_initials", "sex", "age",
+                  "note", "randomized_at", "randomized_by", "voided_at", "voided_by", "void_reason")
+
+
+def make_block():
+    # One permuted block at a time: A/B 1:1, length re-drawn per block so the boundary stays hidden.
+    size = secrets.choice((4, 6))
+    block = ["A"] * (size // 2) + ["B"] * (size // 2)
+    secrets.SystemRandom().shuffle(block)
+    return block
+
+
+def migrate_allocations(conn):
+    # Blocks used to belong to a center; they now belong to a doctor account. Only rows a patient has
+    # actually seen are carried over — unused pre-generated slots were future sequence and are dropped.
+    rows = conn.execute(f"SELECT {', '.join(LEGACY_COLUMNS)} FROM allocations "
+                        "WHERE patient_id IS NOT NULL ORDER BY randomized_at, position").fetchall()
+    conn.execute("BEGIN IMMEDIATE")
+    conn.execute(f"CREATE TABLE allocations_new {ALLOCATIONS_SCHEMA}")
+    next_position = {}
+    for row in rows:
+        owner = row["randomized_by"] or "legacy-unknown"
+        position = next_position[owner] = next_position.get(owner, 0) + 1
+        values = {name: row[name] for name in LEGACY_COLUMNS}
+        values.update(owner=owner, position=position, legacy_position=row["position"])
+        names = list(values)
+        conn.execute(f"INSERT INTO allocations_new({', '.join(names)}) "
+                     f"VALUES ({', '.join(':' + name for name in names)})", values)
+    conn.execute("DROP TABLE allocations")
+    conn.execute("ALTER TABLE allocations_new RENAME TO allocations")
+    conn.commit()
+    print(f"随机序列已按医生账号重建：迁移 {len(rows)} 条随机记录，未使用的预生成名额已丢弃")
 
 
 def init_db():
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     with db() as conn:
-        conn.executescript("""
+        conn.executescript(f"""
         CREATE TABLE IF NOT EXISTS users (
           username TEXT PRIMARY KEY, password_hash TEXT NOT NULL,
           center INTEGER, display_name TEXT NOT NULL, is_admin INTEGER NOT NULL DEFAULT 0
@@ -68,11 +96,7 @@ def init_db():
         CREATE TABLE IF NOT EXISTS centers (
           id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE
         );
-        CREATE TABLE IF NOT EXISTS allocations (
-          center INTEGER NOT NULL, position INTEGER NOT NULL, treatment TEXT NOT NULL,
-          patient_id TEXT, randomized_at TEXT, randomized_by TEXT,
-          PRIMARY KEY(center, position), UNIQUE(center, patient_id)
-        );
+        CREATE TABLE IF NOT EXISTS allocations {ALLOCATIONS_SCHEMA};
         """)
         allocation_columns = {row[1] for row in conn.execute("PRAGMA table_info(allocations)")}
         for name, sql_type in (("patient_initials", "TEXT"), ("sex", "TEXT"),
@@ -81,6 +105,11 @@ def init_db():
                                ("void_reason", "TEXT")):
             if name not in allocation_columns:
                 conn.execute(f"ALTER TABLE allocations ADD COLUMN {name} {sql_type}")
+        if "owner" not in allocation_columns:
+            migrate_allocations(conn)
+        # Duplicate study numbers stay blocked per center, not per account: two doctors in one center
+        # must never be able to randomize the same patient twice.
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_alloc_center_patient ON allocations(center, patient_id)")
         if conn.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 0:
             admin_username = os.environ.get("RCT_ADMIN_USERNAME", "admin")
             admin_password = os.environ.get("RCT_ADMIN_PASSWORD") or secrets.token_urlsafe(12)
@@ -163,19 +192,29 @@ class Handler(SimpleHTTPRequestHandler):
             try:
                 with db() as conn:
                     conn.execute("BEGIN IMMEDIATE")
-                    existing = conn.execute("SELECT * FROM allocations WHERE center=? AND patient_id=?",
+                    existing = conn.execute("SELECT 1 FROM allocations WHERE center=? AND patient_id=?",
                                             (user["center"], patient_id)).fetchone()
                     if existing:
                         return self.send_json({"error": "该研究编号已经随机，不能重复操作"}, 409)
-                    slot = conn.execute("SELECT * FROM allocations WHERE center=? AND patient_id IS NULL ORDER BY position LIMIT 1",
-                                        (user["center"],)).fetchone()
+                    slot = conn.execute("SELECT position, treatment FROM allocations WHERE owner=? AND patient_id IS NULL ORDER BY position LIMIT 1",
+                                        (user["username"],)).fetchone()
                     if not slot:
-                        return self.send_json({"error": "本中心50个随机名额已用完"}, 409)
-                    conn.execute("UPDATE allocations SET patient_id=?, patient_initials=?, sex=?, age=?, note=?, randomized_at=?, randomized_by=? WHERE center=? AND position=?",
-                                 (patient_id, initials, sex, age, note, now, user["username"], user["center"], slot["position"]))
-                return self.send_json({"patient_id": patient_id, "treatment": slot["treatment"], "position": slot["position"], "randomized_at": now})
+                        # This account's block is exhausted: append the next one. No total cap.
+                        start = conn.execute("SELECT COALESCE(MAX(position), 0) FROM allocations WHERE owner=?",
+                                             (user["username"],)).fetchone()[0]
+                        conn.executemany("INSERT INTO allocations(owner, position, treatment, center) VALUES (?, ?, ?, ?)",
+                                         [(user["username"], start + offset, arm, user["center"])
+                                          for offset, arm in enumerate(make_block(), start=1)])
+                        slot = conn.execute("SELECT position, treatment FROM allocations WHERE owner=? AND patient_id IS NULL ORDER BY position LIMIT 1",
+                                            (user["username"],)).fetchone()
+                    conn.execute("UPDATE allocations SET patient_id=?, patient_initials=?, sex=?, age=?, note=?, randomized_at=?, randomized_by=? WHERE owner=? AND position=?",
+                                 (patient_id, initials, sex, age, note, now, user["username"], user["username"], slot["position"]))
+                # position is deliberately withheld: it would tell the doctor where the block ends.
+                return self.send_json({"patient_id": patient_id, "treatment": slot["treatment"], "randomized_at": now})
             except sqlite3.IntegrityError:
                 return self.send_json({"error": "该研究编号已经随机"}, 409)
+            except sqlite3.OperationalError:
+                return self.send_json({"error": "系统正忙，请稍后重试，不要重复点击"}, 503)
         if path == "/api/users":
             user = self.user()
             if not user or not user["is_admin"]:
@@ -196,8 +235,7 @@ class Handler(SimpleHTTPRequestHandler):
                         center = center_row["id"]
                     else:
                         center = conn.execute("INSERT INTO centers(name) VALUES (?)", (center_name,)).lastrowid
-                        conn.executemany("INSERT INTO allocations(center, position, treatment) VALUES (?, ?, ?)",
-                                         [(center, i + 1, arm) for i, arm in enumerate(make_sequence())])
+                    # No sequence is pre-generated: each account gets its first block on its first randomization.
                     conn.execute("INSERT INTO users VALUES (?, ?, ?, ?, 0)",
                                  (username, password_hash(password), center, display_name))
             except sqlite3.IntegrityError:
@@ -229,9 +267,12 @@ class Handler(SimpleHTTPRequestHandler):
                 return self.send_json({"error": "未登录"}, 401)
             body = self.json_body()
             reason = body.get("reason", "").strip()
+            patient_id = body.get("patient_id", "").strip().upper()
             try:
-                center, position = int(body.get("center")), int(body.get("position"))
+                center = int(body.get("center"))
             except (TypeError, ValueError):
+                return self.send_json({"error": "记录参数不正确"}, 400)
+            if not patient_id:
                 return self.send_json({"error": "记录参数不正确"}, 400)
             if not reason or len(reason) > 200:
                 return self.send_json({"error": "请填写200字以内的删除原因"}, 400)
@@ -239,13 +280,14 @@ class Handler(SimpleHTTPRequestHandler):
                 return self.send_json({"error": "无权删除其他中心的患者"}, 403)
             now = datetime.now(timezone.utc).isoformat(timespec="seconds")
             with db() as conn:
-                row = conn.execute("SELECT patient_id, voided_at FROM allocations WHERE center=? AND position=?", (center, position)).fetchone()
-                if not row or not row["patient_id"]:
+                row = conn.execute("SELECT owner, position, voided_at FROM allocations WHERE center=? AND patient_id=?",
+                                   (center, patient_id)).fetchone()
+                if not row:
                     return self.send_json({"error": "患者记录不存在"}, 404)
                 if row["voided_at"]:
                     return self.send_json({"error": "该患者记录已经删除"}, 409)
-                conn.execute("UPDATE allocations SET voided_at=?, voided_by=?, void_reason=? WHERE center=? AND position=?",
-                             (now, user["username"], reason, center, position))
+                conn.execute("UPDATE allocations SET voided_at=?, voided_by=?, void_reason=? WHERE owner=? AND position=?",
+                             (now, user["username"], reason, row["owner"], row["position"]))
             return self.send_json({"ok": True})
         self.send_error(404)
 
@@ -268,9 +310,10 @@ class Handler(SimpleHTTPRequestHandler):
         if path == "/api/records":
             with db() as conn:
                 if user["is_admin"]:
-                    rows = conn.execute("SELECT c.name center_name, a.center, a.position, a.patient_id, a.patient_initials, a.sex, a.age, a.note, a.treatment, a.randomized_at, a.randomized_by FROM allocations a JOIN centers c ON c.id=a.center WHERE a.patient_id IS NOT NULL AND a.voided_at IS NULL ORDER BY c.name, a.position").fetchall()
+                    rows = conn.execute("SELECT c.name center_name, a.center, a.owner, a.position, a.patient_id, a.patient_initials, a.sex, a.age, a.note, a.treatment, a.randomized_at, a.randomized_by FROM allocations a JOIN centers c ON c.id=a.center WHERE a.patient_id IS NOT NULL AND a.voided_at IS NULL ORDER BY c.name, a.owner, a.position").fetchall()
                 else:
-                    rows = conn.execute("SELECT c.name center_name, a.center, a.position, a.patient_id, a.patient_initials, a.sex, a.age, a.note, a.treatment, a.randomized_at, a.randomized_by FROM allocations a JOIN centers c ON c.id=a.center WHERE a.center=? AND a.patient_id IS NOT NULL AND a.voided_at IS NULL ORDER BY a.position", (user["center"],)).fetchall()
+                    # owner and position are withheld: they would reveal how far into the block this account is.
+                    rows = conn.execute("SELECT c.name center_name, a.center, a.patient_id, a.patient_initials, a.sex, a.age, a.note, a.treatment, a.randomized_at, a.randomized_by FROM allocations a JOIN centers c ON c.id=a.center WHERE a.center=? AND a.patient_id IS NOT NULL AND a.voided_at IS NULL ORDER BY a.randomized_at", (user["center"],)).fetchall()
             return self.send_json({"records": [dict(r) for r in rows]})
         if path == "/api/users":
             if not user["is_admin"]:
@@ -280,20 +323,24 @@ class Handler(SimpleHTTPRequestHandler):
             return self.send_json({"users": [dict(r) for r in rows]})
         if path == "/api/progress":
             with db() as conn:
-                rows = conn.execute("SELECT a.center, c.name center_name, SUM(CASE WHEN a.patient_id IS NOT NULL AND a.voided_at IS NULL THEN 1 ELSE 0 END) used FROM allocations a JOIN centers c ON c.id=a.center GROUP BY a.center, c.name ORDER BY c.name").fetchall()
+                # LEFT JOIN: nothing is pre-generated any more, so a center with 0 patients has no allocation rows.
+                rows = conn.execute("SELECT c.id center, c.name center_name, COALESCE(SUM(CASE WHEN a.patient_id IS NOT NULL AND a.voided_at IS NULL THEN 1 ELSE 0 END), 0) used FROM centers c LEFT JOIN allocations a ON a.center=c.id GROUP BY c.id, c.name ORDER BY c.name").fetchall()
             visible = rows if user["is_admin"] else [r for r in rows if r["center"] == user["center"]]
             return self.send_json({"progress": [dict(r) for r in visible]})
         if path == "/api/export":
+            patient_columns = ["患者研究编号", "姓名缩写", "性别", "年龄", "备注", "分组", "随机时间(UTC)", "操作者"]
             with db() as conn:
                 if user["is_admin"]:
-                    rows = conn.execute("SELECT c.name, a.position, a.patient_id, a.patient_initials, a.sex, a.age, a.note, a.treatment, a.randomized_at, a.randomized_by FROM allocations a JOIN centers c ON c.id=a.center WHERE a.patient_id IS NOT NULL AND a.voided_at IS NULL ORDER BY c.name, a.position").fetchall()
+                    rows = conn.execute("SELECT c.name, a.owner, a.position, a.patient_id, a.patient_initials, a.sex, a.age, a.note, a.treatment, a.randomized_at, a.randomized_by FROM allocations a JOIN centers c ON c.id=a.center WHERE a.patient_id IS NOT NULL AND a.voided_at IS NULL ORDER BY c.name, a.owner, a.position").fetchall()
+                    header = ["中心", "医生账号", "账号内序号"] + patient_columns
                     filename = "rct-all-records.csv"
                 else:
-                    rows = conn.execute("SELECT c.name, a.position, a.patient_id, a.patient_initials, a.sex, a.age, a.note, a.treatment, a.randomized_at, a.randomized_by FROM allocations a JOIN centers c ON c.id=a.center WHERE a.center=? AND a.patient_id IS NOT NULL AND a.voided_at IS NULL ORDER BY a.position", (user["center"],)).fetchall()
+                    rows = conn.execute("SELECT c.name, a.patient_id, a.patient_initials, a.sex, a.age, a.note, a.treatment, a.randomized_at, a.randomized_by FROM allocations a JOIN centers c ON c.id=a.center WHERE a.center=? AND a.patient_id IS NOT NULL AND a.voided_at IS NULL ORDER BY a.randomized_at", (user["center"],)).fetchall()
+                    header = ["中心"] + patient_columns
                     filename = "rct-center-records.csv"
             stream = io.StringIO()
             writer = csv.writer(stream)
-            writer.writerow(["中心", "中心序号", "患者研究编号", "姓名缩写", "性别", "年龄", "备注", "分组", "随机时间(UTC)", "操作者"])
+            writer.writerow(header)
             writer.writerows([tuple(r) for r in rows])
             payload = ("\ufeff" + stream.getvalue()).encode("utf-8")
             self.send_response(200)

@@ -26,7 +26,7 @@
       <div id="result" class="result hidden"></div>
     </section>
     <section id="userPanel" class="card hidden">
-      <div class="sectionTitle"><div><h2>中心账号管理</h2><p class="hint">管理员可创建中心账号；患者录入仅在中心账号登录后显示。已有患者记录的中心不能删除。</p></div></div>
+      <div class="sectionTitle"><div><h2>中心账号管理</h2><p class="hint">管理员可创建中心账号；患者录入仅在中心账号登录后显示。每个账号有独立的随机序列，为已有中心增加账号不会改变其他账号的序列。已有患者记录的中心不能删除。</p></div></div>
       <div class="accountForm"><label>登录账号<input id="newUsername" maxlength="30" placeholder="例如 doctor01"></label>
       <label>医生姓名/称呼<input id="newDisplayName" maxlength="40" placeholder="例如 张医生"></label>
       <label>中心名称<input id="newCenterName" maxlength="60" placeholder="例如 第一医院"></label>
@@ -35,7 +35,7 @@
       <div class="tableWrap"><table><thead><tr><th>账号</th><th>医生姓名/称呼</th><th>所属中心</th><th>操作</th></tr></thead><tbody id="users"></tbody></table></div>
     </section>
     <section class="card"><div class="sectionTitle"><div><h2>随机记录</h2><p class="hint">仅显示已完成的随机，不显示未来序列。</p></div><a id="export" class="button" href="/api/export">导出 CSV</a></div>
-      <div class="tableWrap"><table><thead><tr><th>中心</th><th>序号</th><th>研究编号</th><th>姓名缩写</th><th>性别</th><th>年龄</th><th>备注</th><th>分组</th><th>时间</th><th>操作者</th><th>操作</th></tr></thead><tbody id="records"></tbody></table></div>
+      <div class="tableWrap"><table><thead id="recordsHead"></thead><tbody id="records"></tbody></table></div>
     </section>
   </div><div id="toast" class="toast hidden"></div>
 </main><script src="app.js"></script>

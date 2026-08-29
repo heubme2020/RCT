@@ -26,8 +26,8 @@ SESSIONS = {}
 SESSION_TIMEOUT = int(os.environ.get("RCT_SESSION_TIMEOUT", "1800"))  # 默认30分钟
 RANDOMIZATION_ALGORITHM = "sha256-random-block4-6-v3"
 LEGACY_FIXED6_ALGORITHM = "sha256-fixed-block6-v2"
-APP_VERSION = "2026.07.13-r4"
-APP_UPDATED_AT = "2026-07-13"
+APP_VERSION = "2026.08.29-r5"
+APP_UPDATED_AT = "2026-08-29"
 PARTICIPANT_STATUSES = {"已随机", "治疗中", "完成随访", "脱落", "撤回知情同意", "失访", "方案违背", "误随机"}
 
 
